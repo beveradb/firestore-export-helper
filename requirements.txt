@@ -1,0 +1,12 @@
+# Firestore LevelDB to JSON Converter Requirements
+# Install with: pip install -r requirements.txt
+
+# Main dependency for parsing LevelDB exports from Firestore
+leveldb-export==0.1.1
+
+# Standard library modules used (no additional install needed):
+# - json
+# - os
+# - sys
+# - pathlib
+# - typing 
