@@ -10,7 +10,8 @@ import csv
 import sys
 import argparse
 from pathlib import Path
-from typing import Dict, Any, List, Set
+from typing import Dict, Any, List, Set, Tuple
+from collections import defaultdict, Counter
 
 def flatten_dict(d: Dict[str, Any], parent_key: str = '', sep: str = '_') -> Dict[str, Any]:
     """Flatten a nested dictionary."""
@@ -41,6 +42,43 @@ def get_all_fields(documents: List[Dict[str, Any]], exclude_internal: bool = Tru
     
     return all_fields
 
+def analyze_document_types(documents: List[Dict[str, Any]], exclude_internal: bool = True) -> Dict[str, List[int]]:
+    """Analyze and categorize documents by their field structure."""
+    document_types = defaultdict(list)
+    
+    for i, doc in enumerate(documents):
+        # Get all fields in this document
+        flattened = flatten_dict(doc)
+        
+        if exclude_internal:
+            fields = {k for k in flattened.keys() if not k.startswith('_')}
+        else:
+            fields = set(flattened.keys())
+        
+        # Create a signature based on the fields
+        doc_signature = tuple(sorted(fields))
+        document_types[doc_signature].append(i)
+    
+    return document_types
+
+def get_field_coverage(documents: List[Dict[str, Any]], exclude_internal: bool = True) -> Dict[str, float]:
+    """Get the coverage percentage for each field."""
+    field_counts = Counter()
+    total_docs = len(documents)
+    
+    for doc in documents:
+        flattened = flatten_dict(doc)
+        
+        if exclude_internal:
+            fields = {k for k in flattened.keys() if not k.startswith('_')}
+        else:
+            fields = set(flattened.keys())
+        
+        for field in fields:
+            field_counts[field] += 1
+    
+    return {field: (count / total_docs) * 100 for field, count in field_counts.items()}
+
 def export_collection_to_csv(
     json_file: str, 
     collection_name: str, 
@@ -48,7 +86,10 @@ def export_collection_to_csv(
     exclude_internal: bool = True,
     include_fields: List[str] = None,
     exclude_fields: List[str] = None,
-    flatten_nested: bool = True
+    flatten_nested: bool = True,
+    analyze_types: bool = False,
+    filter_by_type: str = None,
+    min_field_coverage: float = 0.0
 ) -> None:
     """
     Export a collection to CSV format.
@@ -61,6 +102,9 @@ def export_collection_to_csv(
         include_fields: List of specific fields to include (optional)
         exclude_fields: List of fields to exclude (optional)
         flatten_nested: Whether to flatten nested objects
+        analyze_types: Whether to show document type analysis
+        filter_by_type: Filter documents by type (e.g., "1" for type 1)
+        min_field_coverage: Minimum field coverage percentage to include field
     """
     
     # Load the JSON data
@@ -83,11 +127,49 @@ def export_collection_to_csv(
         print(f"Collection '{collection_name}' is empty.")
         sys.exit(1)
     
-    print(f"Exporting {len(documents)} documents from '{collection_name}' collection...")
+    print(f"Found {len(documents)} documents in '{collection_name}' collection...")
     
-    # Determine output filename
-    if not output_file:
-        output_file = f"{collection_name}_export.csv"
+    # Analyze document types if requested
+    if analyze_types:
+        print("\n=== DOCUMENT TYPE ANALYSIS ===")
+        document_types = analyze_document_types(documents, exclude_internal)
+        field_coverage = get_field_coverage(documents, exclude_internal)
+        
+        print(f"Found {len(document_types)} different document types:")
+        for i, (signature, doc_indices) in enumerate(document_types.items()):
+            print(f"\nType {i+1}: {len(doc_indices)} documents ({len(doc_indices)/len(documents)*100:.1f}%)")
+            print(f"Fields: {list(signature)}")
+            print(f"Sample document indices: {doc_indices[:5]}{'...' if len(doc_indices) > 5 else ''}")
+        
+        print(f"\n=== FIELD COVERAGE ===")
+        for field, coverage in sorted(field_coverage.items(), key=lambda x: x[1], reverse=True):
+            print(f"{field}: {coverage:.1f}%")
+        
+        if not filter_by_type:
+            print(f"\nTo export only documents of a specific type, use --filter-by-type option.")
+            print(f"To filter out sparse fields, use --min-field-coverage option.")
+            return
+    
+    # Filter documents by type if requested
+    if filter_by_type:
+        document_types = analyze_document_types(documents, exclude_internal)
+        type_signatures = list(document_types.keys())
+        
+        try:
+            type_index = int(filter_by_type) - 1
+            if type_index < 0 or type_index >= len(type_signatures):
+                print(f"Invalid type index. Available types: 1-{len(type_signatures)}")
+                sys.exit(1)
+            
+            selected_signature = type_signatures[type_index]
+            selected_indices = document_types[selected_signature]
+            documents = [documents[i] for i in selected_indices]
+            
+            print(f"Filtered to {len(documents)} documents of type {filter_by_type}")
+            
+        except ValueError:
+            print(f"Invalid type index: {filter_by_type}")
+            sys.exit(1)
     
     # Process documents
     processed_docs = []
@@ -108,6 +190,12 @@ def export_collection_to_csv(
     # Determine fields to include
     all_fields = get_all_fields(processed_docs, exclude_internal)
     
+    # Apply field coverage filter
+    if min_field_coverage > 0:
+        field_coverage = get_field_coverage(processed_docs, exclude_internal)
+        all_fields = {field for field in all_fields if field_coverage.get(field, 0) >= min_field_coverage}
+        print(f"Filtered to {len(all_fields)} fields with coverage >= {min_field_coverage}%")
+    
     if include_fields:
         # Only include specified fields
         fields_to_export = set(include_fields) & all_fields
@@ -127,6 +215,11 @@ def export_collection_to_csv(
     if not fields_to_export:
         print("No fields to export after applying filters.")
         sys.exit(1)
+    
+    # Determine output filename
+    if not output_file:
+        suffix = f"_type{filter_by_type}" if filter_by_type else ""
+        output_file = f"{collection_name}{suffix}_export.csv"
     
     print(f"Exporting {len(fields_to_export)} fields: {fields_to_export}")
     
@@ -154,6 +247,18 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # Analyze document types in the collection
+  python collection_to_csv.py firestore_export.json users --analyze-types
+  
+  # Export only user profile documents (type 1)
+  python collection_to_csv.py firestore_export.json users --filter-by-type 1
+  
+  # Export only device session documents (type 2)
+  python collection_to_csv.py firestore_export.json users --filter-by-type 2
+  
+  # Export only fields that appear in at least 50% of documents
+  python collection_to_csv.py firestore_export.json users --min-field-coverage 50
+  
   # Export users collection with default settings
   python collection_to_csv.py firestore_export.json users
   
@@ -182,12 +287,22 @@ Examples:
                        help='Exclude these specific fields')
     parser.add_argument('--no-flatten', action='store_true', 
                        help='Do not flatten nested objects (convert to JSON strings instead)')
+    parser.add_argument('--analyze-types', action='store_true',
+                       help='Analyze and show document type patterns')
+    parser.add_argument('--filter-by-type', 
+                       help='Filter documents by type (use --analyze-types first to see available types)')
+    parser.add_argument('--min-field-coverage', type=float, default=0.0,
+                       help='Minimum field coverage percentage to include field (0-100)')
     
     args = parser.parse_args()
     
     # Validate inputs
     if not Path(args.json_file).exists():
         print(f"JSON file not found: {args.json_file}")
+        sys.exit(1)
+    
+    if args.min_field_coverage < 0 or args.min_field_coverage > 100:
+        print("min-field-coverage must be between 0 and 100")
         sys.exit(1)
     
     export_collection_to_csv(
@@ -197,7 +312,10 @@ Examples:
         exclude_internal=not args.include_internal,
         include_fields=args.include_fields,
         exclude_fields=args.exclude_fields,
-        flatten_nested=not args.no_flatten
+        flatten_nested=not args.no_flatten,
+        analyze_types=args.analyze_types,
+        filter_by_type=args.filter_by_type,
+        min_field_coverage=args.min_field_coverage
     )
 
 if __name__ == "__main__":
